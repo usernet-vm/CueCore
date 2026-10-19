@@ -964,6 +964,8 @@ const I18N_EN = {
   /* ---- Nav / Sidebar / Status ---- */
   "Werkzeuge":"Tools",
   "Track Resolver":"Track Resolver", "Tagger":"Tagger", "EDL / Cue-Sheet":"EDL / Cue Sheet",
+  "{n} Event(s) nicht als Musik gewertet: {list}":"{n} event(s) not counted as music: {list}",
+  "Videospur":"video track", "Länge 0":"zero length", "Ton aus Videodatei (O-Ton)":"audio from a video file (production sound)",
   "GVL Labels":"GVL Labels", "Label-Katalog":"Label Catalogue", "Label-Datenbank":"Label Database", "Track-Datenbank":"Track Database", "Track-Suche":"Track Search", "Cue-Sheet":"Cue Sheet", "Datenbank":"Database", "Einstellungen":"Settings",
   "GVL-Master":"GVL master", "Einträge":"Entries", "Verifizierte Songs":"Verified songs",
   "GVL-Stand":"GVL version", "Labelcodes":"Label codes", "Tracks in DB":"Tracks in DB", "Online-Dienste":"Online services",
@@ -3370,7 +3372,7 @@ const edlState={cards:[], name:'cue_sheet', content:'', list:null, fps:25, onlin
 const _EST={
   found_in_db:      {t:'In DB',          c:'ok'},
   db_review:        {t:'In DB, ungeprüft', c:'warn'},
-  resolved_and_written:{t:'Online gefunden', c:'ok'},
+  resolved_and_written:{t:'Online gefunden', c:'warn'},
   index_hit:        {t:'Im Index',        c:'ok'},
   ambiguous:        {t:'Gleichstand',     c:'warn'},
   unresolved:       {t:'Nicht gefunden',  c:'warn'},
@@ -3433,6 +3435,7 @@ async function runEdlImport(online){
     const data=await r.json(); box.innerHTML='';
     if(!r.ok){ box.appendChild(el('div','empty', ()=>(data.detail&&t(String(data.detail)))||t('Import fehlgeschlagen.'))); return; }   // Backend-Meldung über t()
     edlState.lastList = isList ? {mapping:data.mapping, rows:data.rows, list_warnings:data.list_warnings} : null;
+    edlState.ignored = isList ? [] : (data.ignored||[]);   // vom Backend weggelassene Nicht-Musik-Events
     edlState.cards=mergeEdlCards(data.cards, $('#emerge').checked, $('#estems').checked); edlState.filter=''; setEdlProgress('');
     renderEdl(edlDataFromCards());   // renderEdl setzt den Schritt nach der Ampel
   }catch(err){ logErr('Import', err); box.innerHTML=''; box.appendChild(el('div','empty', ()=>(isList ? t('Import fehlgeschlagen. Ist es eine CSV/XLSX-Liste mit Kopfzeile? Backend läuft?') : t('Import fehlgeschlagen. Ist es eine gültige Schnittliste (CMX3600, Assemble List, XML, FCPXML, Pro Tools)? Backend läuft?'))+(err&&err.message?' ('+err.message+')':''))); return; }
@@ -3440,6 +3443,13 @@ async function runEdlImport(online){
   // renderEdl ließ sonst jeden Import als „fehlgeschlagen“ erscheinen).
   try{
     rememberEdl(edlState.filename||edlState.name, edlState.cards.length, edlState.cards.filter(c=>edlAmpel(c)==='bad').length);
+    if((edlState.ignored||[]).length){
+      // Video-, O-Ton- und Länge-0-Events sind keine Cues — sichtbar machen, was weggelassen wurde.
+      const ign=edlState.ignored;
+      const info=el('div','hint', ()=>t('{n} Event(s) nicht als Musik gewertet: {list}',{n:ign.length,
+        list:ign.slice(0,8).map(x=>'#'+x.event_num+' '+(x.clip_name||'–')+' ('+t(x.reason)+')').join(' · ')+(ign.length>8?' …':'')}));
+      box.prepend(info);
+    }
     if(isList && edlState.lastList){
       // Erkannte Spalten sichtbar machen — der Mensch sieht, was die Liste geliefert hat.
       const d=edlState.lastList, mp=d.mapping||{};
@@ -3960,13 +3970,12 @@ async function exportEdl(fmt, btn){
   finally{ btn.disabled=false; setTimeout(()=>setEdlProgress(''),6000); }
 }
 
-// Ampel je Cue: grün = Labelcode steht fest (Datenbank, Library-Lieferung, Netz mit AUTO),
-// gelb = es gibt einen Vorschlag, den ein Mensch bestätigen muss (Index, Katalog-Kürzel, Gleichstand, Netz mit Review),
+// Ampel je Cue: grün = Labelcode steht fest (Datenbank, Library-Lieferung, im Editor übernommen),
+// gelb = es gibt einen Vorschlag, den ein Mensch bestätigen muss (Netz, Index, Katalog-Kürzel, Gleichstand),
 // rot = nichts — Cue muss recherchiert, im Editor gefüllt oder als Nicht-Musik gelöscht werden.
 function edlAmpel(c){
   const lc=!!c.labelcode;
   if(lc && (c.status==='found_in_db' || c.status==='library_matched' || c.status==='list_lc' || c.status==='confirmed')) return 'ok';
-  if(lc && c.status==='resolved_and_written') return (c.band && c.band!=='auto') ? 'warn' : 'ok';
   if(lc || c.status==='ambiguous' || c.status==='index_hit' || c.status==='catalog_hint' || (c.tied||[]).length) return 'warn';
   return 'bad';
 }

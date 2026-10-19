@@ -256,3 +256,67 @@ def test_parse_edl_dispatches_cmx3600():
 def test_parse_edl_falls_back_to_cmx_when_assemble_markers_absent():
     # Keine FtgStart/MasDur-Spalten -> CMX3600-Pfad.
     assert len(parse_edl(SAMPLE_EDL)) == 3
+
+
+# --- Überblendungen, Musik-Filter, Split-Edits ---------------------------------------------------------------
+
+_DISSOLVE_EDL = (
+    "FCM: NON-DROP FRAME\n"
+    "009  AX       A3    C        00:00:00:00 00:00:00:00 10:01:50:00 10:01:50:00\n"
+    "009  AX       A3    D    025 00:00:05:00 00:00:25:00 10:01:50:00 10:02:10:00\n"
+    "* FROM CLIP NAME: Alt - Ausblenden.wav\n"
+    "* TO CLIP NAME: Neu - Einblenden.wav\n")
+
+
+def test_dissolve_line_with_duration_is_parsed():
+    """'D    025' (Blendendauer) brach die Regex — die einblendende Zeile fiel samt Musik aus dem Cue-Sheet."""
+    events = parse_cmx3600(_DISSOLVE_EDL)
+    assert [e.edit_type for e in events] == ["C", "D"]
+    assert events[1].record_in == "10:01:50:00" and events[1].record_out == "10:02:10:00"
+
+
+def test_dissolve_from_and_to_clip_names_go_to_their_lines():
+    out_ev, in_ev = parse_cmx3600(_DISSOLVE_EDL)
+    assert out_ev.clip_name == "Alt - Ausblenden.wav"
+    assert in_ev.clip_name == "Neu - Einblenden.wav"
+    assert in_ev.gema_duration_sec() == 20
+
+
+def test_split_music_events_drops_video_zero_length_and_camera_audio():
+    from core.edl import split_music_events
+    evs = [EDLEvent("001", "R", "V", "C", "00:00:00:00", "00:00:02:00", "10:00:00:00", "10:00:02:00",
+                    from_clip_name="A001C003.MXF"),
+           EDLEvent("002", "R", "A", "C", "00:00:00:00", "00:00:02:00", "10:00:00:00", "10:00:02:00",
+                    from_clip_name="A001C003_220801.MXF"),
+           EDLEvent("003", "AX", "A3", "C", "00:00:00:00", "00:00:00:00", "10:00:05:00", "10:00:05:00",
+                    from_clip_name="Song - Leer.wav"),
+           EDLEvent("004", "AX", "A3", "C", "00:00:00:00", "00:00:10:00", "10:00:05:00", "10:00:15:00",
+                    from_clip_name="Artist - Song.wav"),
+           EDLEvent("005", "AX", "B", "C", "00:00:00:00", "00:00:10:00", "10:00:20:00", "10:00:30:00",
+                    from_clip_name="Artist - Clip mit Bild.wav")]
+    keep, dropped = split_music_events(evs)
+    assert [e.event_num for e in keep] == ["004", "005"]
+    assert [r for _, r in dropped] == ["Videospur", "Ton aus Videodatei (O-Ton)", "Länge 0"]
+
+
+def test_merge_contiguous_joins_split_edit_and_rounds_once():
+    from core.edl import merge_contiguous
+    a = EDLEvent("006", "AX", "A3", "C", "00:00:10:00", "00:00:20:10", "10:01:20:00", "10:01:30:10",
+                 from_clip_name="Night Drive.wav")
+    b = EDLEvent("007", "AX", "A3", "C", "00:00:40:00", "00:00:54:15", "10:01:30:10", "10:01:45:00",
+                 from_clip_name="Night Drive.wav")
+    out = merge_contiguous([a, b])
+    assert len(out) == 1 and out[0].record_out == "10:01:45:00"
+    assert out[0].gema_duration_sec() == 25          # vorher 11 + 15 = 26
+    assert a.record_out == "10:01:30:10"             # Eingabe bleibt unverändert
+
+
+def test_merge_contiguous_keeps_separate_uses_and_other_clips():
+    from core.edl import merge_contiguous
+    evs = [EDLEvent("001", "AX", "A3", "C", "00:00:00:00", "00:00:10:00", "10:00:00:00", "10:00:10:00",
+                    from_clip_name="Theme.wav"),
+           EDLEvent("002", "AX", "A3", "C", "00:00:00:00", "00:00:05:00", "10:00:10:00", "10:00:15:00",
+                    from_clip_name="Other.wav"),
+           EDLEvent("003", "AX", "A3", "C", "00:00:20:00", "00:00:30:00", "10:00:20:00", "10:00:30:00",
+                    from_clip_name="Theme.wav")]
+    assert [e.event_num for e in merge_contiguous(evs)] == ["001", "002", "003"]

@@ -43,6 +43,7 @@ _EVENT_LINE = re.compile(
     r"(?P<reel>\S+)\s+"
     r"(?P<track>[A-Z0-9/]+)\s+"                      # V, A, A2, AA, B, A2/V …
     r"(?P<edit>[A-Z]+\d*)\s+"                        # C, D, W###, KB …
+    r"(?:(?P<trans_dur>\d{1,4})\s+)?"                # Blendendauer in Frames bei D/W/K ('D    025')
     r"(?P<src_in>\d{2}:\d{2}:\d{2}[:;]\d{2})\s+"
     r"(?P<src_out>\d{2}:\d{2}:\d{2}[:;]\d{2})\s+"
     r"(?P<rec_in>\d{2}:\d{2}:\d{2}[:;]\d{2})\s+"
@@ -57,6 +58,7 @@ def _comment_re(cid: str) -> re.Pattern:
     return re.compile(r"^\*?\s*" + cid + r"\s*:?\s*(.+)$", re.IGNORECASE)
 
 _C_FROM_CLIP_NAME = _comment_re("FROM CLIP NAME")
+_C_TO_CLIP_NAME = _comment_re("TO CLIP NAME")       # Überblendung: Name der einblendenden Zeile
 _C_SOURCE_FILE = _comment_re("SOURCE FILE")
 _C_MEDIA_REF = _comment_re(r"FROM (?:FILE|CLIP)")   # Nucoda 'FROM FILE', Avid 'FROM CLIP'
 # Avid hängt nach den Events einen Marker-Metadaten-Block an, eingeleitet mit '* ===='.
@@ -140,9 +142,13 @@ def parse_cmx3600(text: str) -> list[EDLEvent]:
     """CMX3600-Text zu EDLEvents. Kommentarzeilen direkt nach einem Event füllen
     dessen Quellnamen (FROM CLIP NAME / SOURCE FILE / FROM FILE|CLIP). Der Drop-Frame-
     Modus folgt dem letzten 'FCM:'-Header und dem Frame-Trenner im Timecode selbst.
-    Ein Avid-Marker-Block ('* ====') beendet die Event-Auswertung."""
+    Ein Avid-Marker-Block ('* ====') beendet die Event-Auswertung.
+
+    Überblendung (D/W/K): zwei Zeilen mit derselben Event-Nummer — die erste (meist 0 Frames) ist der
+    ausblendende Clip, die zweite der einblendende. FROM CLIP NAME gehört zur ersten, TO CLIP NAME zur
+    zweiten; SOURCE FILE/FROM FILE füllen der Reihe nach die erste Zeile, der der Wert noch fehlt."""
     events: list[EDLEvent] = []
-    current: EDLEvent | None = None
+    group: list[EDLEvent] = []          # Zeilen des aktuellen Events (2 bei Überblendung)
     fcm_drop = False
     for line in text.splitlines():
         line = line.rstrip()
@@ -162,23 +168,34 @@ def parse_cmx3600(text: str) -> list[EDLEvent]:
                 source_in=m["src_in"], source_out=m["src_out"],
                 record_in=m["rec_in"], record_out=m["rec_out"], drop_frame=drop,
             )
+            if not group or group[0].event_num != current.event_num:
+                group = []
+            group.append(current)
             events.append(current)
             continue
-        if current is None:
+        if not group:
             continue
         cm = _C_FROM_CLIP_NAME.match(line)
         if cm:
-            if not current.from_clip_name:
-                current.from_clip_name = cm.group(1).strip()
+            if not group[0].from_clip_name:
+                group[0].from_clip_name = cm.group(1).strip()
+            continue
+        cm = _C_TO_CLIP_NAME.match(line)
+        if cm:
+            if len(group) > 1 and not group[-1].from_clip_name:
+                group[-1].from_clip_name = cm.group(1).strip()
             continue
         cm = _C_SOURCE_FILE.match(line)
         if cm:
-            if not current.source_file:
-                current.source_file = cm.group(1).strip()
+            target = next((e for e in group if not e.source_file), None)
+            if target is not None:
+                target.source_file = cm.group(1).strip()
             continue
         cm = _C_MEDIA_REF.match(line)
-        if cm and not current.media_ref:
-            current.media_ref = cm.group(1).strip()
+        if cm:
+            target = next((e for e in group if not e.media_ref), None)
+            if target is not None:
+                target.media_ref = cm.group(1).strip()
     return events
 
 
@@ -525,6 +542,75 @@ def dedupe_multitrack(events: list[EDLEvent]) -> list[EDLEvent]:
             continue
         seen.add(key)
         out.append(ev)
+    return out
+
+
+# Kamera-/Video-Container: Ton daraus ist O-Ton, keine Musik (A001C003_220801.MXF, CLIP0001.MOV …).
+_VIDEO_EXT = re.compile(r"\.(mxf|mov|mp4|m4v|avi|mts|m2ts|r3d|braw|ari|dnxhd|dpx|mkv|wmv)$", re.IGNORECASE)
+
+
+def non_music_reason(ev: EDLEvent) -> str:
+    """Grund, warum ein Event kein Musik-Cue ist ('' = Musik-Kandidat):
+    reine Videospur, Länge 0 (ausblendende Zeile einer Überblendung) oder Ton aus einem Video-Container."""
+    track = (ev.track_type or "").upper()
+    if track and "A" not in track and track != "B":
+        return "Videospur"
+    if ev.duration_override is None and ev.record_in == ev.record_out:
+        return "Länge 0"
+    if _VIDEO_EXT.search((ev.clip_name or "").strip()):
+        return "Ton aus Videodatei (O-Ton)"
+    return ""
+
+
+def split_music_events(events: list[EDLEvent]) -> tuple[list[EDLEvent], list[tuple[EDLEvent, str]]]:
+    """(Musik-Kandidaten, [(ausgefiltertes Event, Grund)]). Atmo/SFX werden NICHT nach Namen gefiltert —
+    das bleibt der Karte überlassen (unparsable_clip_name), damit kein echter Titel verschwindet."""
+    keep: list[EDLEvent] = []
+    dropped: list[tuple[EDLEvent, str]] = []
+    for ev in events:
+        reason = non_music_reason(ev)
+        if reason:
+            dropped.append((ev, reason))
+        else:
+            keep.append(ev)
+    return keep, dropped
+
+
+def merge_contiguous(events: list[EDLEvent], fps: float = 25.0) -> list[EDLEvent]:
+    """Split-Edits zu einem Cue: gleicher Quellname, Record-Bereiche überlappend oder lückenlos
+    aneinander (auch über Spuren hinweg) = EINE Nutzung. Dauer = Anfang bis Ende im Programm, aufgerundet
+    wird erst danach (sonst wird jedes Teilstück einzeln aufgerundet: 10 + 15 statt 25 s).
+    Getrennte Verwendungen (mit Lücke) bleiben eigene Cues. Events mit exakter Dauer aus XML
+    (duration_override) und Events ohne Quellnamen bleiben unangetastet."""
+    out: list[EDLEvent] = []
+    open_by_name: dict[str, tuple[EDLEvent, float, float]] = {}
+
+    def secs(ev: EDLEvent) -> tuple[float, float]:
+        return (timecode_to_seconds(ev.record_in, fps, ev.drop_frame),
+                timecode_to_seconds(ev.record_out, fps, ev.drop_frame))
+
+    order = sorted(range(len(events)), key=lambda i: secs(events[i])[0] if events[i].duration_override is None else -1)
+    merged: dict[int, EDLEvent] = {}
+    for i in order:
+        ev = events[i]
+        name = ev.clip_name
+        if not name or ev.duration_override is not None:
+            merged[i] = ev
+            continue
+        start, end = secs(ev)
+        prev = open_by_name.get(name)
+        if prev is not None and start <= prev[2] + 1e-6:
+            base, p_start, p_end = prev
+            if end > p_end:
+                base.record_out = ev.record_out
+                open_by_name[name] = (base, p_start, end)
+            continue
+        base = EDLEvent(**{**ev.__dict__})
+        open_by_name[name] = (base, start, end)
+        merged[i] = base
+    for i in range(len(events)):
+        if i in merged:
+            out.append(merged[i])
     return out
 
 

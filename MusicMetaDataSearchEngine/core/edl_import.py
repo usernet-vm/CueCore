@@ -14,7 +14,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from . import songsdb, watch
-from .edl import EDLEvent, dedupe_multitrack
+from .edl import EDLEvent, dedupe_multitrack, merge_contiguous
 from .normalize import export_lc, normalize_labelcode
 
 
@@ -242,7 +242,8 @@ def _pick_candidate(cands, con, local_fn):
 
 
 def cross_check(events: list[EDLEvent], con, *, resolve_fn=None, label_lookup=None,
-                fps: float = 25.0, dedupe: bool = True, catalog_fn=None, local_fn=None) -> list[dict]:
+                fps: float = 25.0, dedupe: bool = True, catalog_fn=None, local_fn=None,
+                merge_split_edits: bool = True) -> list[dict]:
     """Pro EDL-Event: Clip-Name -> Interpret/Titel/LC/Label (`watch.parse_cue_from_stem`,
     kein ID3-Zugriff möglich, s. core/edl.py), gegen songs.db prüfen.
 
@@ -259,15 +260,22 @@ def cross_check(events: list[EDLEvent], con, *, resolve_fn=None, label_lookup=No
       LC + Label als Vorschlag (Status `catalog_hint`, kein Auto-Confirm).
 
     dedupe=True (Default): ein Clip auf Video + mehreren Audiospuren zählt als EIN Cue.
+    merge_split_edits=True (Default): lückenlos aneinanderliegende Stücke desselben Clips (Split-Edit) sind
+    EINE Nutzung, aufgerundet wird die Gesamtdauer (s. edl.merge_contiguous).
+
+    Online gefundene Treffer gehen mit review_status='review' nach songs.db: beim nächsten Import sind sie
+    „In DB, ungeprüft“ (gelb), bis der Mensch die Zeile im Editor speichert (update_song -> verified).
     """
     if dedupe:
         events = dedupe_multitrack(events)
+    if dedupe and merge_split_edits:                 # dedupe=False heißt: jedes Event bleibt eine Zeile
+        events = merge_contiguous(events, fps)
     results: list[dict] = []
     for ev in events:
         duration = ev.gema_duration_sec(fps)
         card: dict = {"event_num": ev.event_num, "clip_name": ev.clip_name,
                       "artist": "", "title": "", "labelname": "", "labelcode": "",
-                      "duration_sec": duration, "status": ""}
+                      "duration_sec": duration, "status": "", "record_in": ev.record_in}
         if not ev.clip_name:
             card["status"] = "no_clip_name"
             results.append(card)
@@ -291,6 +299,19 @@ def cross_check(events: list[EDLEvent], con, *, resolve_fn=None, label_lookup=No
                     _apply_catalog(card, cat)
             results.append(card)
             continue
+        # ISRC im Clip-Namen: eindeutiger Schlüssel — vor dem Zerlegen nach Interpret/Titel prüfen und aus dem
+        # Namen nehmen, sonst landet er als Titel oder Interpret auf der Karte.
+        isrc, stem = watch.extract_isrc_from_stem(stem)
+        if isrc:
+            card["isrc"] = isrc
+            ihit = songsdb.find_by_isrc(con, isrc)
+            if ihit:
+                _take(card, ihit)
+                card["artist"], card["title"] = ihit["interpret"], ihit["titel"]
+                card["status"] = "db_review" if ihit.get("review_status") == "review" else "found_in_db"
+                card["matched_by"] = "isrc"
+                results.append(card)
+                continue
         parsed = watch.parse_cue_from_stem(stem)
         lc = parsed["labelcode"]
         if parsed.get("library_name"):
@@ -378,7 +399,7 @@ def cross_check(events: list[EDLEvent], con, *, resolve_fn=None, label_lookup=No
         # ohne Cue-Dauer und ohne Autoren: Netz-Autoren sind nur Vorschlag auf der Karte
         songsdb.upsert(con, interpret=artist, titel=title,
                        labelname=resolved.get("labelname", ""), labelcode=resolved.get("labelcode", ""),
-                       isrc=resolved.get("isrc", ""), source_type="edl_import")
+                       isrc=resolved.get("isrc", ""), source_type="edl_import", review_status="review")
         _take(card, resolved)
         if any(resolved.get(k) for k in ("komponist", "texter", "verlag")):
             card["author_new"] = True

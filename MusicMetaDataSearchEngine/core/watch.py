@@ -45,6 +45,21 @@ def _parse_underscore_scheme(stem: str) -> tuple[str, str]:
     return fields[-1], fields[0]                    # Interpret = letztes Feld, Titel = erstes
 
 
+# ISRC im Dateinamen ('GBAYE7700001_Titel', 'DE-A12-21-00042 Titel'): Länderkürzel, 3 Zeichen Registrant,
+# 2 Ziffern Jahr, 5 Ziffern Nummer. Nicht an Buchstaben/Ziffern angrenzend, sonst greift es mitten in Katalognummern.
+_ISRC_IN_NAME = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5})(?![A-Za-z0-9])")
+
+
+def extract_isrc_from_stem(stem: str) -> tuple[str, str]:
+    """(ISRC ohne Bindestriche, Name ohne den ISRC) — ('', stem) wenn keiner drin ist. Der Rest wird
+    wie jeder Clip-Name zerlegt; sonst würde der ISRC als Titel oder Interpret gelesen."""
+    m = _ISRC_IN_NAME.search(stem or "")
+    if not m:
+        return "", stem
+    rest = (stem[:m.start()] + " " + stem[m.end():]).strip(" _–-")
+    return m.group(1).replace("-", ""), re.sub(r"\s{2,}", " ", rest)
+
+
 def extract_lc_from_stem(stem: str) -> str:
     """Labelcode aus dem Dateinamen ziehen -> normalisierte Ziffern ('' = keiner).
 

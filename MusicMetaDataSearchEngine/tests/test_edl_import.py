@@ -109,7 +109,8 @@ def test_flywheel_does_not_bring_back_an_old_cue_duration(tmp_path):
     assert first[0]["status"] == "resolved_and_written" and first[0]["duration_sec"] == 7
     assert songsdb.find(con, "New Artist", "New Song")["duration_sec"] is None
     second = cross_check([_ev("001", "New Artist - New Song.mp3", rec_out="00:01:00:00")], con)
-    assert second[0]["status"] == "found_in_db" and second[0]["duration_sec"] == 60
+    # Netz-Treffer bleiben bis zur Bestätigung im Editor ein Vorschlag (db_review), die Dauer kommt aus der EDL
+    assert second[0]["status"] == "db_review" and second[0]["duration_sec"] == 60
 
 
 def test_cross_check_unresolved_without_labelcode(tmp_path):
@@ -603,3 +604,37 @@ def test_soft_break_nur_in_langen_wortketten():
     assert _soft_break("Agnes Obel – Dorian") == "Agnes Obel – Dorian"
     out = _soft_break("ZZQ_TESTPROJEKT_EINS+ZZQ+NORDWAND+SERIE_1920X1080")
     assert "​" in out and out.replace("​", "") == "ZZQ_TESTPROJEKT_EINS+ZZQ+NORDWAND+SERIE_1920X1080"
+
+
+def test_cross_check_split_edit_is_one_cue(tmp_path):
+    con = _db(tmp_path)
+    evs = [_ev("001", "X - Y.wav", "00:00:00:00", "00:00:10:00"), _ev("002", "X - Y.wav", "00:00:10:00", "00:00:25:00")]
+    res = cross_check(evs, con)
+    assert len(res) == 1 and res[0]["duration_sec"] == 25 and res[0]["record_in"] == "00:00:00:00"
+    assert len(cross_check(evs, con, merge_split_edits=False)) == 2
+
+
+def test_online_hit_is_written_for_review_and_stays_yellow_on_reimport(tmp_path):
+    """Ein Netz-Treffer ist ein Vorschlag: beim nächsten Import 'db_review' (gelb), nicht 'found_in_db'."""
+    con = _db(tmp_path)
+    resolve = lambda a, t: {"labelcode": "LC00121", "labelname": "Atlantic"}
+    first = cross_check([_ev("001", "New Artist - New Song.mp3")], con, resolve_fn=resolve)
+    assert first[0]["status"] == "resolved_and_written"
+    second = cross_check([_ev("001", "New Artist - New Song.mp3")], con)
+    assert second[0]["status"] == "db_review"
+    # Im Editor gespeichert -> verifiziert
+    row = songsdb.find_row(con, "New Artist", "New Song")
+    songsdb.update_song(con, row["id"], {"labelname": "Atlantic"})
+    assert cross_check([_ev("001", "New Artist - New Song.mp3")], con)[0]["status"] == "found_in_db"
+
+
+def test_isrc_in_clip_name_is_used_and_not_read_as_title(tmp_path):
+    con = _db(tmp_path)
+    songsdb.upsert(con, interpret="ABBA", titel="Dancing Queen", labelname="Polar", labelcode="LC07032",
+                   isrc="SE-AYD-76-01020")
+    con.commit()
+    hit = cross_check([_ev("001", "SEAYD7601020_dq_final.wav")], con)[0]
+    assert hit["status"] == "found_in_db" and hit["matched_by"] == "isrc" and hit["title"] == "Dancing Queen"
+    miss = cross_check([_ev("002", "GBAYE7700001_Unknown.wav")], con)[0]
+    assert miss["isrc"] == "GBAYE7700001"
+    assert "GBAYE7700001" not in (miss["title"] + miss["artist"])

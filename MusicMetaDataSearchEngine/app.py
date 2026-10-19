@@ -1433,6 +1433,7 @@ class EdlImportIn(BaseModel):
     online: bool = False           # False = nur songs.db (schnell, kostenlos); True = Netz-Lookup
     merge_identical: bool = False  # gleiche Cues zu einer Zeile zusammenfassen (Dauer summiert)
     unify_stems: bool = False      # Stem-Varianten auf den Basistitel vereinheitlichen
+    music_only: bool = True        # Videospuren, Länge-0-Zeilen und O-Ton aus Videodateien nicht als Cue werten
 
 
 @app.post("/api/edl/import")
@@ -1448,6 +1449,9 @@ def edl_import_endpoint(body: EdlImportIn) -> dict:
     events = edl.parse_edl(body.content)   # CMX3600, Avid „Assemble List", Final Cut Pro 7 XML, FCPXML, Pro Tools Session-Text (auto)
     if not events:
         raise HTTPException(422, "Keine Cues erkannt — CMX3600-EDL, Avid Assemble List, Final Cut Pro XML (xmeml), FCPXML oder Pro Tools „Session Info as Text“?")
+    ignored: list[tuple] = []
+    if body.music_only:
+        events, ignored = edl.split_music_events(events)
     rf = _edl_resolve_fn if body.online else (_edl_index_fn if INDEX_CON is not None else None)
     ll = _label_lookup if DB_META["ready"] else None   # LC aus Dateiname -> offizielles GVL-Label
     fetcher = netfetch.build_fetcher(DB_PATH) if body.online else None
@@ -1464,8 +1468,10 @@ def edl_import_endpoint(body: EdlImportIn) -> dict:
     edl_import.attach_rights(cards, ll)       # Zusammenfassen kann den LC aus einer späteren Karte füllen
     from collections import Counter
     total = sum(c.get("duration_sec", 0) or 0 for c in cards)
-    out = {"events": len(events), "cues": len(cards), "cards": cards,
-           "summary": dict(Counter(c["status"] for c in cards)), "total_duration_sec": total}
+    out = {"events": len(events) + len(ignored), "cues": len(cards), "cards": cards,
+           "summary": dict(Counter(c["status"] for c in cards)), "total_duration_sec": total,
+           "ignored": [{"event_num": ev.event_num, "track": ev.track_type, "clip_name": ev.clip_name,
+                        "record_in": ev.record_in, "reason": reason} for ev, reason in ignored]}
     if fetcher is not None:
         out["stats"] = _fetch_stats(fetcher)
     return out

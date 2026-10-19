@@ -441,6 +441,17 @@ def clear_cue_durations(con: sqlite3.Connection) -> int:
     return n
 
 
+def find_by_isrc(con: sqlite3.Connection, isrc: str) -> dict | None:
+    """songs-Zeile zu einem ISRC (Bindestriche/Schreibung egal). Nur bei genau EINER Zeile — mehrere Zeilen
+    mit demselben ISRC sind ein Datenfehler, dann lieber nichts."""
+    key = re.sub(r"[^A-Z0-9]", "", (isrc or "").upper())
+    if len(key) != 12:
+        return None
+    rows = con.execute(f"SELECT {','.join(_ALL_FIELDS)} FROM songs "
+                       "WHERE REPLACE(UPPER(COALESCE(isrc,'')),'-','')=? LIMIT 2", (key,)).fetchall()
+    return dict(rows[0]) if len(rows) == 1 else None
+
+
 def find_row(con: sqlite3.Connection, artist: str, title: str) -> dict | None:
     """Wie find(), aber inklusive id — für den Resolver-Merge (Bearbeiten/Abgleich),
     der die Zeile danach gezielt per id aktualisieren können muss."""

@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from core import deezer, discogs, musicbrainz, netfetch, songsdb
-from core.edl import parse_cmx3600_file
+from core.edl import parse_cmx3600_file, split_music_events
 from core.edl_import import cross_check, export_excel
 from core.labeldb import connect, lookup_by_code
 from core.labelmatch import build_index_from_db
@@ -69,8 +69,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"labels.db nicht gefunden: {labels_db}\n(zuerst build_label_db.py laufen lassen)", file=sys.stderr)
         return 2
 
-    events = parse_cmx3600_file(edl_path)
-    print(f"[1/3] {len(events)} EDL-Events geparst.")
+    events, ignored = split_music_events(parse_cmx3600_file(edl_path))
+    print(f"[1/3] {len(events) + len(ignored)} EDL-Events geparst, {len(ignored)} nicht als Musik gewertet.")
+    for ev, reason in ignored:
+        print(f"      ignoriert: {ev.event_num} {ev.track_type} {ev.clip_name or '-'} ({reason})")
 
     songsdb.seed(ACTIVE_SONGS, SONGS_SEED)
     con = songsdb.open(ACTIVE_SONGS)

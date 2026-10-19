@@ -389,6 +389,24 @@ def test_edl_import_offline_leaves_missing_unresolved(tmp_path):
     assert r.json()["cards"][0]["status"] == "missing_no_resolver"
 
 
+def test_edl_import_skips_video_and_camera_audio_and_reports_them(tmp_path):
+    _setup(tmp_path)
+    edl = ("001  A001C003 V     C        14:22:10:00 14:22:20:00 10:00:00:00 10:00:10:00\n"
+           "* FROM CLIP NAME: A001C003_220801.MXF\n"
+           "002  A001C003 A     C        14:22:10:00 14:22:20:00 10:00:00:00 10:00:10:00\n"
+           "* FROM CLIP NAME: A001C003_220801.MXF\n"
+           "003  AX       A3    C        00:00:00:00 00:00:30:00 10:00:05:00 10:00:35:00\n"
+           "* FROM CLIP NAME: Zzq Nichtexistent - Kein Echter Song 9x.wav\n")
+    j = client.post("/api/edl/import", json={"content": edl, "online": False}).json()
+    assert [c["clip_name"] for c in j["cards"]] == ["Zzq Nichtexistent - Kein Echter Song 9x.wav"]
+    assert j["events"] == 3
+    assert [(x["event_num"], x["reason"]) for x in j["ignored"]] == [("001", "Videospur"),
+                                                                     ("002", "Ton aus Videodatei (O-Ton)")]
+    # abschaltbar: dann wie bisher jedes Event mit Clip-Namen als Cue
+    j = client.post("/api/edl/import", json={"content": edl, "online": False, "music_only": False}).json()
+    assert len(j["cards"]) == 2 and j["ignored"] == []
+
+
 def test_edl_import_rejects_non_edl(tmp_path):
     _setup(tmp_path)
     r = client.post("/api/edl/import", json={"content": "kein gültiger EDL-Inhalt\n"})
