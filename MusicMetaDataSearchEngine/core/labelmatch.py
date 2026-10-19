@@ -28,7 +28,9 @@ ALIASES: dict[str, str] = {
     "warner records": "00392",
     "universal island records ltd": "00407", "island": "00407",
     "rca victor": "00316",
-    "bmg": "01413",
+    # „BMG“ allein bleibt bewusst offen: bis 2008 BMG Entertainment (heute Sony-Katalog, LC 01413), seit 2008
+    # BMG Rights Management (LC 19813) — der Tag sagt nicht, welches gemeint ist.
+    "bmg rights management": "19813",
     "cosmos music": "25145", "cosmos": "25145",
     "fueled by ramen": "00121",
     "artist house": "14337", "artisthouse": "14337",
@@ -66,13 +68,18 @@ MAJOR_TOKENS: dict[str, str] = {
 # '07552 REPUBLIC' (Universal Music Entertainment GmbH) vs '57251 Republic Records'
 # (Z Records Ltd). Der exakte Voll-Match liefe sonst aufs Indie.
 MAJOR_HERSTELLER: tuple[str, ...] = (
-    "universal music", "warner music", "sony music", "deutsche grammophon",
+    "universal music", "warner music", "sony music", "deutsche grammophon", "bmg rights management",
 )
 
 GENERIC = re.compile(
     r"\b(records?|recordings?|recording|music|musik|ltd|limited|gmbh|inc|llc|label|the|co"
     r"|uk|us|usa|gb|germany|deutschland|france|australia|norway|sweden|europe|european"
     r"|international|intl|pty)\b")
+
+
+_PAREN = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+# Mehrere Labels in einem Tag: 'BMG / Mute', 'Kobalt, BMG', '… under exclusive license to Interscope'.
+_COMPOUND = re.compile(r"\s*(?:/|;|,|\bunder (?:exclusive )?licen[cs]e to\b|\bin association with\b)\s*", re.IGNORECASE)
 
 
 def norm(s: str) -> str:
@@ -110,6 +117,9 @@ class LabelIndex:
     # norm(name) bzw. strip_generic davon -> Code. Nur GVL-geprüfte Codes, nur eindeutige Schlüssel.
     # Dritte Quelle NACH GVL-Master und ALIASES — greift erst, wenn der Master nichts hergibt.
     mb_alias: dict[str, str] = field(default_factory=dict)
+    # Labelname ohne Klammerzusatz -> {codes}: 'Rise Records (BMG)' ist im Tag nur 'Rise Records'.
+    # Greift erst, wenn der volle Name nichts trifft; mehrdeutig -> nicht raten.
+    paren_free: dict[str, set[str]] = field(default_factory=dict)
 
 
 def build_index(rows: Iterable[tuple]) -> LabelIndex:
@@ -132,6 +142,9 @@ def build_index(rows: Iterable[tuple]) -> LabelIndex:
             idx.code2hersteller[code] = row[2]
         n = norm(label)
         idx.full.setdefault(n, set()).add(code)
+        pf = norm(_PAREN.sub(" ", label))
+        if pf and pf != n:
+            idx.paren_free.setdefault(pf, set()).add(code)
         sn = strip_generic(n)
         if sn:
             idx.stripped.setdefault(sn, set()).add(code)
@@ -288,6 +301,9 @@ def match_label(label: str, idx: LabelIndex) -> str | None:
     if n in idx.full and len(idx.full[n]) == 1:
         code = next(iter(idx.full[n]))
         return _major_imprint_override(sn, code, idx) or code
+    # Name ohne Klammerzusatz im Master ('Rise Records (BMG)'), nur wenn der volle Name selbst unbekannt ist
+    if n not in idx.full and len(idx.paren_free.get(n, ())) == 1:
+        return next(iter(idx.paren_free[n]))
     # sonst fuzzy (Suffix-bereinigt)
     cands: set[str] = set()
     if sn in idx.full:
@@ -305,6 +321,14 @@ def match_label(label: str, idx: LabelIndex) -> str | None:
     code = idx.mb_alias.get(n) or idx.mb_alias.get(sn)
     if code:
         return code
+    # Zusammengesetzter Tag: jeden Teil einzeln — nur wenn genau EIN Code herauskommt
+    parts = [p for p in _COMPOUND.split(label or "") if p and p.strip()]
+    if len(parts) > 1:
+        codes = {c for c in (match_label(p, idx) for p in parts) if c}
+        if len(codes) == 1:
+            return next(iter(codes))
+        if len(codes) > 1:
+            return None
     # Fallback 1: uneindeutiges Universal (auch UME) -> Universal Sammellabel
     if re.search(r"\b(universal|ume)\b", n):
         return "97777"

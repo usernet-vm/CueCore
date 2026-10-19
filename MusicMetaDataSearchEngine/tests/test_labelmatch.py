@@ -129,3 +129,35 @@ def test_mb_alias_missing_file_is_empty(tmp_path):
     from core.labelmatch import attach_mb_aliases
     idx = build_index([("00121", "Atlantic", "Warner Music")])
     assert attach_mb_aliases(idx, tmp_path / "nope.csv") == 0 and idx.mb_alias == {}
+
+
+# --- BMG ---------------------------------------------------------------------------------------------------
+
+_BMG = build_index([
+    ("01413", "BMG Entertainment", "Sony Music Entertainment Germany GmbH", ""),
+    ("19813", "BMG RIGHTS MANAGEMENT", "BMG Rights Management GmbH", ""),
+    ("51803", "Rise Records (BMG)", "BMG Rights Management GmbH", ""),
+    ("28867", "Rise Music", "Rise International Music Ltd", ""),
+    ("05834", "Mute Records", "BMG Rights Management GmbH", ""),
+])
+
+
+def test_plain_bmg_is_not_mapped_to_old_sony_catalog():
+    """'BMG' allein traf LC 01413 (BMG Entertainment, heute Sony, Rückruf R12) — für heutiges BMG falsch."""
+    assert match_label("BMG", EMPTY) is None
+    assert match_label("BMG", _BMG) is None
+
+
+def test_bmg_rights_management_variants():
+    assert match_label("BMG Rights Management", EMPTY) == "19813"
+    assert match_label("BMG Rights Management (UK) Ltd", _BMG) == "19813"
+
+
+def test_label_with_parenthetical_suffix_in_master():
+    assert match_label("Rise Records", _BMG) == "51803"
+    assert match_label("Rise Records (BMG)", _BMG) == "51803"
+
+
+def test_compound_label_tag_resolves_when_unique():
+    assert match_label("BMG / Mute", _BMG) == "05834"
+    assert match_label("Mute Records, BMG Rights Management", _BMG) is None   # zwei Codes -> nicht raten
